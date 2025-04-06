@@ -1,10 +1,18 @@
 from fastapi import FastAPI
+from contextlib import asynccontextmanager
 from app.api.V1 import routes
+from app.db import db  # ✅ Import db from the new file
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await db.connect()
+    yield
+    await db.disconnect()
+
+app = FastAPI(lifespan=lifespan)
 
 app.include_router(routes.router)
 
 @app.get("/")
-def read_root():
+async def read_root():
     return {"message": "Welcome to HealthBridge API"}
