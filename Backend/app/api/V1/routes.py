@@ -1,6 +1,34 @@
 from fastapi import APIRouter, HTTPException
 from app.schemas import UserCreate, UserOut, JournalEntryCreate, JournalEntryOut, HealthServiceCreate, HealthServiceOut
 from prisma import Prisma
+import qrcode
+from fastapi.responses import StreamingResponse
+import io
+from fastapi import HTTPException
+import json
+import google.generativeai as genai
+import os
+from dotenv import load_dotenv
+from pydantic import BaseModel
+from fastapi import HTTPException
+from datetime import date
+from datetime import datetime
+
+
+class ProfileCreateRequest(BaseModel):
+    userId: str
+    gender: str
+    height: int
+    weight: int
+    dateOfBirth: date  # Use YYYY-MM-DD format
+
+
+
+load_dotenv()
+api_key = os.getenv("GOOGLE_API_KEY")
+print("Google API Key:", api_key)  # ✅ Debug
+
+genai.configure(api_key=api_key)
 
 router = APIRouter()
 
@@ -83,3 +111,115 @@ async def create_health_service(service: HealthServiceCreate):
 async def list_health_services():
     services = await db.healthservice.find_many()
     return services
+
+@router.get("/users/{user_id}/qrcode")
+async def generate_user_qr_code(user_id: str):
+    # ✅ Step 1: Fetch user profile and journal data from database
+    user = await db.user.find_unique(
+        where={"id": user_id},
+        include={
+            "profile": {
+                "include": {"medicalConditions": True}
+            },
+            "journalEntries": True
+        }
+    )
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # ✅ Step 2: Prepare the QR data
+    qr_data = {
+        "name": user.name,
+        "email": user.email,
+        "profile": user.profile,
+        "journalEntries": user.journalEntries,
+    }
+
+    # ✅ Step 3: Convert data to JSON string (handles dates too)
+    qr_text = json.dumps(qr_data, default=str)
+
+    # ✅ Step 4: Generate QR code image
+    qr_img = qrcode.make(qr_text)
+
+    # ✅ Step 5: Convert image to byte stream
+    img_byte_arr = io.BytesIO()
+    qr_img.save(img_byte_arr, format='PNG')
+    img_byte_arr.seek(0)
+
+    # ✅ Step 6: Return image as StreamingResponse
+    return StreamingResponse(img_byte_arr, media_type="image/png")
+
+@router.post("/users/{user_id}/generate-summary")
+async def generate_health_summary(user_id: str):
+    user = await db.user.find_unique(
+        where={"id": user_id},
+        include={
+            "profile": {"include": {"medicalConditions": True}},
+            "journalEntries": True,
+        },
+    )
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    profile = user.profile
+    medical_conditions = profile.medicalConditions if profile else []
+    journal_entries = user.journalEntries
+
+    journal_summaries = "\n".join([
+        f"- {entry.entryDate.strftime('%Y-%m-%d')}: {entry.entryTitle} | Medications: {entry.medicationsTaken or 'None'} | Symptoms: {entry.symptomsHad or 'None'} | Notes: {entry.otherNotes or 'None'}"
+        for entry in journal_entries
+    ]) if journal_entries else "No recent journal entries."
+
+    medical_conditions_summary = ", ".join([cond.condition for cond in medical_conditions]) if medical_conditions else "None"
+
+    prompt = f"""
+User Health Summary:
+- Name: {user.name}
+- Email: {user.email}
+- Gender: {profile.gender if profile else 'Not provided'}
+- Height: {profile.height if profile else 'Not provided'} cm
+- Weight: {profile.weight if profile else 'Not provided'} kg
+- Date of Birth: {profile.dateOfBirth.strftime('%Y-%m-%d') if profile else 'Not provided'}
+- Medical Conditions: {medical_conditions_summary}
+- Recent Journal Entries:
+{journal_summaries}
+
+Based on the above data, provide:
+1. A concise health summary.
+2. Any health improvement suggestions.
+3. Questions the user should ask a doctor.
+"""
+
+    model = genai.GenerativeModel(model_name="gemini-2.0-flash")
+    response = model.generate_content(prompt)
+
+    ai_summary = response.text
+
+    return {"summary": ai_summary}
+
+@router.post("/profiles")
+async def create_profile(profile_data: ProfileCreateRequest):
+    # ✅ Check if user exists
+    user = await db.user.find_unique(where={"id": profile_data.userId})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # ✅ Check if profile already exists
+    existing_profile = await db.profile.find_unique(where={"userId": profile_data.userId})
+    if existing_profile:
+        raise HTTPException(status_code=400, detail="Profile already exists for this user")
+    date_of_birth_datetime = datetime.combine(profile_data.dateOfBirth, datetime.min.time())
+    # ✅ Create the profile
+    profile = await db.profile.create(
+        data={
+            "userId": profile_data.userId,
+            "gender": profile_data.gender,
+            "height": profile_data.height,
+            "weight": profile_data.weight,
+            "dateOfBirth": date_of_birth_datetime.isoformat() + "Z",
+        }
+    )
+
+    return {"message": "Profile created successfully", "profile": profile}
