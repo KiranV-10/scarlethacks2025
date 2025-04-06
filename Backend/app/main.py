@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-from app.api.V1 import routes
+from app.api.v1 import routes
 from app.db import db  # ✅ Import db from the new file
 
 @asynccontextmanager

@@ -1,12 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from app.schemas import UserCreate, UserOut, JournalEntryCreate, JournalEntryOut, HealthServiceCreate, HealthServiceOut
 from prisma import Prisma
-from app.db import db  
+
 router = APIRouter()
 
 
 
-
+from app.db import db  
 # ---------------------
 # User Endpoints
 # ---------------------
@@ -41,10 +41,21 @@ async def create_journal(journal: JournalEntryCreate):
     user = await db.user.find_unique(where={"id": journal.userId})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    new_journal = await db.journalentry.create(
-        data=journal.dict()
-    )
+
+    data = journal.model_dump()
+
+    # ✅ Convert date to full ISO 8601 DateTime string
+    data["entryDate"] = data["entryDate"].isoformat() + "T00:00:00.000Z"
+
+    # ✅ Fix: Prisma relation requires nested `connect`
+    data["user"] = {"connect": {"id": journal.userId}}
+
+    # Remove userId from data (because Prisma uses the relation)
+    del data["userId"]
+
+    new_journal = await db.journalentry.create(data=data)
     return new_journal
+
 
 @router.get("/journal/{user_id}", response_model=list[JournalEntryOut])
 async def get_journal_entries(user_id: str):
